@@ -1,0 +1,126 @@
+#Genome_Survey: Figure S1b
+#Start docker image
+export workdir=/work/my_Pvi
+export scriptsdir=/work/scripts/
+export datadir=/work/data/Pvi_genome
+
+mkdir 01.kmer_analysis
+cd 01.kmer_analysis
+#We used the JELLYFISH software, it has multiple functions. Its commonly used functions are as follows:
+#count: Performs statistical counting of K-mers;
+#stats: Generates a comprehensive summary of the results obtained from K-mer counting;
+#hist: Creates a K-mer frequency statistics table based on the K-mer counting results;
+#dump: Converts the binary results from K-mer statistical counting into plain text content;
+#merge: Combines multiple results derived from K-mer statistical counting;
+#query: Queries the occurrence frequency of a specified K-mer in the K-mer counting results.
+
+kmer=19
+
+## build reads unpress data
+ls $datadir/illumina_*.fastq.gz |awk '{print "gzip -dc "$0 }' > data.txt
+
+#Performing K-mer Calculation
+#1、Jellyfish Official Website: http://www.genome.umd.edu/jellyfish.html
+#Among them, descriptions of commonly used parameter options are as follows:
+#-g Sequencing data file
+#-G Number of files processed simultaneously
+#-m Specifies the length of the K-mer to be selected;
+#-s Specifies the size of the hash table used for storing K-mer sequences, with units of M (megabyte) or G (gigabyte); if this value is large enough, a single hash file will be generated eventually; if this value is not large enough, multiple hash files will be generated;
+#-t Number of threads required for program operation; single-threaded by default;
+#-o Prefix name of the output result file;
+#-C Performs statistics on both the positive and negative strands of genomic DNA;
+#-L Does not output K-mers with counts lower than this value;
+#-U Does not output K-mers with counts higher than this value;
+
+jellyfish count -t 4 -C -m $kmer -s 1G  -g data.txt -G 2  -o  kmer_counts.jf
+
+#Generating K-mer Frequency Statistics Table
+jellyfish histo -v -o kmer_counts.hist -t 4 -h 10000 kmer_counts.jf
+
+#statistics sum of K-mer
+jellyfish stats -o kmer_counts.stat kmer_counts.jf
+
+#2、drawing Frequency distribution of K-mer to estimate the size of the genome
+##################################################
+#GenomeScope 2.0 genome assessment
+##################################################
+#online method：http://qb.cshl.edu/genomescope/genomescope2.0/
+
+genomescope.R -i kmer_counts.hist -o Pvi_out  -p 1 -k $kmer --max_kmercov 10000
+
+#Result
+cat gs_out/summary.txt
+
+#The first column represents statistical indicators;
+#The second column represents the predicted minimum value of the corresponding indicator;
+#The third column represents the predicted maximum value of the corresponding indicator;
+
+#Image Explanation
+#Occasionally, it is difficult to determine whether a peak in the k-mer spectrum is a major peak. For this reason, GenomeScope 2.0 analyzes a transformed k-mer spectrum, in which the heights of higher-order peaks are increased.
+#The blue bars represent the actual observed values;
+#The black fitted line corresponds to all remaining k-mers after excluding the part considered erroneous (the orange-red fitted line segment). These k-mers are regarded as reliable k-mer data, and only this part of the data is used to estimate the genome size;
+#The yellow fitted line is considered to be derived from the k-mer distribution in the non-repetitive regions of the genome;
+#The orange-red fitted line segment corresponds to k-mers with excessively low depth, which are considered to be introduced by sequencing errors;
+#The vertical black dashed line represents the integer multiple coverage of the predicted minimum depth peak;
+
+
+# To estimate ploidy of Pvi genome  Figure S1a
+
+#We used the Smudgeplot softeware in Performing Genome Ploidy Assessment
+
+#smudgeplot Ploidy Inference; User Guide: https://github.com/KamilSJaron/smudgeplot/wiki/manual-of-smudgeplot-with-jellyfish
+#Obtain depth range L and U; the range can also be defined manually
+L=$(smudgeplot.py cutoff kmer_counts.hist L)
+U=$(smudgeplot.py cutoff kmer_counts.hist U)
+echo $L $U # these need to be sane values like 30 800 or so
+
+#U=1000  #Set manually
+
+
+jellyfish dump -c -L $L -U $U kmer_counts.jf | smudgeplot.py hetkmers -o kmer_pairs
+smudgeplot.py plot kmer_pairs_coverages.tsv -k $kmer  -o my_genome
+
+
+
+
+#3、GCE software in performing Genome assessment
+#-f sample.freq.stat.2colum: K-mer frequency distribution table.
+#-g 173854609857: Total number of K-mer fragments, obtained via the above command or by checking kmer_counts.stat.
+#-H 1: Default value is 0. 0 for homozygous mode, 1 for heterozygous mode.
+#-c : Expected depth of unique K-mers, obtained by visually inspecting the peak value in sample.gce.table.
+#-b 1: 1 for data with bias, 0 for data without bias (default value is 0).
+#-m 1: Evaluation model. 0 for discrete model, 1 for continuous model (default value is 0).
+#-M 1500: Sets the maximum depth (default value is 1500); K-mers with depth greater than 1500 will be ignored.
+#-D 1: Precision of the expected value (default value is 1).
+#For data where it is impossible to determine whether it is homozygous or heterozygous, first run the homozygous mode to obtain the initial peak (raw_peak) — i.e., the expected depth of K-mers — which will be used as the value for the -c parameter.
+#Then run the heterozygous mode with the -c parameter and -H 1 parameter. Finally, compare the results of the two modes to determine which one is more suitable for the current data.
+
+#Homozygous Mode
+gce -f kmer_counts.hist \
+  -H 0 \
+  -g 876075288 \
+  -M 10000 > gce.table 2> gce.log
+
+#Heterozygous Mode
+gce   -f kmer_counts.hist \
+  -H 1 \
+  -c  59 \
+  -g 876075288 \
+  -M 10000 > gce1.table 2> gce1.log
+
+
+#The following content is recorded at the end of the gce.log file:
+#raw_peak: The number of K-mer types with a coverage depth of 75 is the largest, so this is the major peak.
+#effective_kmer_species: Total number of real K-mer types (excluding low-frequency K-mers caused by sequencing errors)
+#effective_kmer_individuals: Total number of real K-mer individuals (excluding low-frequency K-mers caused by sequencing errors)
+#coverage_depth: Estimated coverage depth of real K-mers
+#genome_size: Genome size.
+#genome_size = effective_kmer_individuals / coverage_depth
+#a[1]: Proportion of unique K-mers (K-mers that appear only once in the genome) among the total number of K-mer types.
+#b[1]: Proportion of unique K-mers (K-mers that appear only once in the genome) among the total number of K-mer individuals. This value represents the proportion of sequences with a copy number of 1 in the genome.
+#If the heterozygous mode (-H 1) is used, the following additional information will be obtained at the end of the gce.log file:
+#a[1/2]: Represents the proportion of heterozygous K-mers among all unique K-mer types.
+#b[1/2]: Represents the proportion of heterozygous K-mers among all unique K-mer individuals.
+#Additional information that can be obtained through calculation:
+#K-mer species heterozygous ratio: Calculated from a[1/2].
+
